@@ -1,0 +1,39 @@
+{
+  "name": "aedes-persistence-mysql",
+  "version": "1.0.0",
+  "description": "MySQL persistence for Aedes MQTT broker",
+  "main": "index.js",
+  "scripts": {
+    "test": "tape test/*.js | tap-spec",
+    "lint": "standard"
+  },
+  "keywords": [
+    "aedes",
+    "mqtt",
+    "broker",
+    "persistence",
+    "mysql"
+  ],
+  "author": "Gearace",
+  "license": "MIT",
+  "dependencies": {
+    "mysql2": "^3.6.0",
+    "aedes-persistence": "^10.1.0",
+    "through2": "^4.0.2",
+    "pump": "^3.0.0"
+  },
+  "devDependencies": {
+    "aedes": "^0.50.0",
+    "tape": "^5.6.0",
+    "tap-spec": "^5.0.0",
+    "standard": "^17.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Gearace/aedes-persistence-mysql.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Gearace/aedes-persistence-mysql/issues"
+  },
+  "homepage": "https://github.com/Gearace/aedes-persistence-mysql#readme"
+}
