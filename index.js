@@ -1,8 +1,6 @@
 'use strict'
 
 const mysql = require('mysql2/promise')
-const through = require('through2')
-const pump = require('pump')
 const { Readable } = require('stream')
 
 function AedesPersistenceMySQL (opts) {
@@ -69,7 +67,7 @@ AedesPersistenceMySQL.prototype._createTables = async function () {
   try {
     // Subscriptions table
     await connection.execute(`
-      CREATE TABLE IF NOT EXISTS subscriptions (
+      CREATE TABLE IF NOT EXISTS aedes_subscriptions (
         id INT AUTO_INCREMENT PRIMARY KEY,
         client_id VARCHAR(255) NOT NULL,
         topic VARCHAR(512) NOT NULL,
@@ -83,7 +81,7 @@ AedesPersistenceMySQL.prototype._createTables = async function () {
 
     // Retained messages table
     await connection.execute(`
-      CREATE TABLE IF NOT EXISTS retained (
+      CREATE TABLE IF NOT EXISTS aedes_retained (
         id INT AUTO_INCREMENT PRIMARY KEY,
         topic VARCHAR(512) NOT NULL UNIQUE,
         payload LONGBLOB,
@@ -95,7 +93,7 @@ AedesPersistenceMySQL.prototype._createTables = async function () {
 
     // Outgoing packets table
     await connection.execute(`
-      CREATE TABLE IF NOT EXISTS outgoing (
+      CREATE TABLE IF NOT EXISTS aedes_outgoing (
         id INT AUTO_INCREMENT PRIMARY KEY,
         client_id VARCHAR(255) NOT NULL,
         message_id INT,
@@ -112,7 +110,7 @@ AedesPersistenceMySQL.prototype._createTables = async function () {
 
     // Incoming packets table (for QoS 2)
     await connection.execute(`
-      CREATE TABLE IF NOT EXISTS incoming (
+      CREATE TABLE IF NOT EXISTS aedes_incoming (
         id INT AUTO_INCREMENT PRIMARY KEY,
         client_id VARCHAR(255) NOT NULL,
         message_id INT NOT NULL,
@@ -126,7 +124,7 @@ AedesPersistenceMySQL.prototype._createTables = async function () {
 
     // Will messages table
     await connection.execute(`
-      CREATE TABLE IF NOT EXISTS will (
+      CREATE TABLE IF NOT EXISTS aedes_will (
         id INT AUTO_INCREMENT PRIMARY KEY,
         client_id VARCHAR(255) NOT NULL UNIQUE,
         topic VARCHAR(512) NOT NULL,
@@ -143,7 +141,7 @@ AedesPersistenceMySQL.prototype._createTables = async function () {
     // Add TTL cleanup if configured
     if (this.ttl.subscriptions && this.ttl.subscriptions > 0) {
       await connection.execute(`
-        CREATE EVENT IF NOT EXISTS cleanup_subscriptions
+        CREATE EVENT IF NOT EXISTS aedes_cleanup_subscriptions
         ON SCHEDULE EVERY 1 HOUR
         DO DELETE FROM subscriptions WHERE created_at < DATE_SUB(NOW(), INTERVAL ${this.ttl.subscriptions} SECOND)
       `)
@@ -161,7 +159,7 @@ AedesPersistenceMySQL.prototype.storeRetained = function (packet, cb) {
   }
 
   const query = `
-    INSERT INTO retained (topic, payload, qos) 
+    INSERT INTO aedes_retained (topic, payload, qos) 
     VALUES (?, ?, ?) 
     ON DUPLICATE KEY UPDATE payload = VALUES(payload), qos = VALUES(qos), created_at = CURRENT_TIMESTAMP
   `
@@ -189,7 +187,7 @@ AedesPersistenceMySQL.prototype.createRetainedStreamCombi = function (patterns) 
     return `topic REGEXP ?`
   })
 
-  const query = `SELECT topic, payload, qos FROM retained WHERE ${conditions.join(' OR ')}`
+  const query = `SELECT topic, payload, qos FROM aedes_retained WHERE ${conditions.join(' OR ')}`
   const params = patterns.map(pattern => 
     '^' + pattern.replace(/\+/g, '[^/]+').replace(/#/g, '.*') + '$'
   )
@@ -218,7 +216,7 @@ AedesPersistenceMySQL.prototype.addSubscriptions = function (client, subscriptio
 
   const values = subscriptions.map(sub => [client.id, sub.topic, sub.qos])
   const query = `
-    INSERT INTO subscriptions (client_id, topic, qos) 
+    INSERT INTO aedes_subscriptions (client_id, topic, qos) 
     VALUES ? 
     ON DUPLICATE KEY UPDATE qos = VALUES(qos), created_at = CURRENT_TIMESTAMP
   `
@@ -234,9 +232,15 @@ AedesPersistenceMySQL.prototype.removeSubscriptions = function (client, topics, 
     return cb(new Error('MySQL persistence not ready'))
   }
 
-  const query = 'DELETE FROM subscriptions WHERE client_id = ? AND topic IN (?)'
+  if (topics.length === 0) {
+    return cb(null, client)
+  }
+
+  // Create placeholders for IN clause
+  const placeholders = topics.map(() => '?').join(',')
+  const query = `DELETE FROM aedes_subscriptions WHERE client_id = ? AND topic IN (${placeholders})`
   
-  this.pool.execute(query, [client.id, topics])
+  this.pool.execute(query, [client.id, ...topics])
     .then(() => cb(null, client))
     .catch(cb)
 }
@@ -247,7 +251,7 @@ AedesPersistenceMySQL.prototype.subscriptionsByClient = function (client, cb) {
     return cb(new Error('MySQL persistence not ready'))
   }
 
-  const query = 'SELECT topic, qos FROM subscriptions WHERE client_id = ?'
+  const query = 'SELECT topic, qos FROM aedes_subscriptions WHERE client_id = ?'
   
   this.pool.execute(query, [client.id])
     .then(([rows]) => {
@@ -267,8 +271,8 @@ AedesPersistenceMySQL.prototype.countOffline = function (cb) {
   }
 
   const queries = [
-    'SELECT COUNT(*) as count FROM subscriptions',
-    'SELECT COUNT(DISTINCT client_id) as count FROM subscriptions'
+    'SELECT COUNT(*) as count FROM aedes_subscriptions',
+    'SELECT COUNT(DISTINCT client_id) as count FROM aedes_subscriptions'
   ]
 
   Promise.all(queries.map(query => this.pool.execute(query)))
@@ -291,7 +295,7 @@ AedesPersistenceMySQL.prototype.subscriptionsByTopic = function (pattern, cb) {
     .replace(/\+/g, '[^/]+')
     .replace(/#/g, '.*') + '$'
 
-  const query = 'SELECT client_id, topic, qos FROM subscriptions WHERE topic REGEXP ?'
+  const query = 'SELECT client_id, topic, qos FROM aedes_subscriptions WHERE topic REGEXP ?'
   
   this.pool.execute(query, [sqlPattern])
     .then(([rows]) => {
@@ -311,7 +315,7 @@ AedesPersistenceMySQL.prototype.cleanSubscriptions = function (client, cb) {
     return cb(new Error('MySQL persistence not ready'))
   }
 
-  const query = 'DELETE FROM subscriptions WHERE client_id = ?'
+  const query = 'DELETE FROM aedes_subscriptions WHERE client_id = ?'
   
   this.pool.execute(query, [client.id])
     .then(() => cb(null, client))
@@ -339,7 +343,7 @@ AedesPersistenceMySQL.prototype.outgoingEnqueueCombi = function (subscriptions, 
   }
 
   const query = `
-    INSERT INTO outgoing (client_id, message_id, topic, payload, qos, retain_flag, dup_flag) 
+    INSERT INTO aedes_outgoing (client_id, message_id, topic, payload, qos, retain_flag, dup_flag) 
     VALUES ?
   `
 
@@ -355,7 +359,7 @@ AedesPersistenceMySQL.prototype.outgoingUpdate = function (client, packet, cb) {
   }
 
   const query = `
-    UPDATE outgoing 
+    UPDATE aedes_outgoing 
     SET message_id = ?, dup_flag = ? 
     WHERE client_id = ? AND topic = ? AND payload = ?
   `
@@ -377,7 +381,7 @@ AedesPersistenceMySQL.prototype.outgoingClearMessageId = function (client, packe
     return cb(new Error('MySQL persistence not ready'))
   }
 
-  const query = 'DELETE FROM outgoing WHERE client_id = ? AND message_id = ?'
+  const query = 'DELETE FROM aedes_outgoing WHERE client_id = ? AND message_id = ?'
   
   this.pool.execute(query, [client.id, packet.messageId])
     .then(() => cb(null, packet))
@@ -394,7 +398,7 @@ AedesPersistenceMySQL.prototype.outgoingStream = function (client) {
     return stream
   }
 
-  const query = 'SELECT * FROM outgoing WHERE client_id = ? ORDER BY id'
+  const query = 'SELECT * FROM aedes_outgoing WHERE client_id = ? ORDER BY id'
   
   this.pool.execute(query, [client.id])
     .then(([rows]) => {
@@ -422,7 +426,7 @@ AedesPersistenceMySQL.prototype.incomingStorePacket = function (client, packet, 
   }
 
   const query = `
-    INSERT INTO incoming (client_id, message_id, topic, payload, qos) 
+    INSERT INTO aedes_incoming (client_id, message_id, topic, payload, qos) 
     VALUES (?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE topic = VALUES(topic), payload = VALUES(payload), qos = VALUES(qos)
   `
@@ -444,7 +448,7 @@ AedesPersistenceMySQL.prototype.incomingGetPacket = function (client, packet, cb
     return cb(new Error('MySQL persistence not ready'))
   }
 
-  const query = 'SELECT * FROM incoming WHERE client_id = ? AND message_id = ?'
+  const query = 'SELECT * FROM aedes_incoming WHERE client_id = ? AND message_id = ?'
   
   this.pool.execute(query, [client.id, packet.messageId])
     .then(([rows]) => {
@@ -468,7 +472,7 @@ AedesPersistenceMySQL.prototype.incomingDelPacket = function (client, packet, cb
     return cb(new Error('MySQL persistence not ready'))
   }
 
-  const query = 'DELETE FROM incoming WHERE client_id = ? AND message_id = ?'
+  const query = 'DELETE FROM aedes_incoming WHERE client_id = ? AND message_id = ?'
   
   this.pool.execute(query, [client.id, packet.messageId])
     .then(() => cb(null, packet))
@@ -482,7 +486,7 @@ AedesPersistenceMySQL.prototype.putWill = function (client, packet, cb) {
   }
 
   const query = `
-    INSERT INTO will (client_id, topic, payload, qos, retain_flag, broker_id) 
+    INSERT INTO aedes_will (client_id, topic, payload, qos, retain_flag, broker_id) 
     VALUES (?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE 
       topic = VALUES(topic), 
@@ -511,7 +515,7 @@ AedesPersistenceMySQL.prototype.getWill = function (client, cb) {
     return cb(new Error('MySQL persistence not ready'))
   }
 
-  const query = 'SELECT * FROM will WHERE client_id = ?'
+  const query = 'SELECT * FROM aedes_will WHERE client_id = ?'
   
   this.pool.execute(query, [client.id])
     .then(([rows]) => {
@@ -535,7 +539,7 @@ AedesPersistenceMySQL.prototype.delWill = function (client, cb) {
     return cb(new Error('MySQL persistence not ready'))
   }
 
-  const query = 'DELETE FROM will WHERE client_id = ?'
+  const query = 'DELETE FROM aedes_will WHERE client_id = ?'
   
   this.pool.execute(query, [client.id])
     .then(() => cb())
@@ -558,9 +562,11 @@ AedesPersistenceMySQL.prototype.streamWill = function (brokers) {
     return stream
   }
 
-  const query = 'SELECT * FROM will WHERE broker_id IN (?)'
+  // Create placeholders for IN clause
+  const placeholders = brokerIds.map(() => '?').join(',')
+  const query = `SELECT * FROM aedes_will WHERE broker_id IN (${placeholders})`
   
-  this.pool.execute(query, [brokerIds])
+  this.pool.execute(query, brokerIds)
     .then(([rows]) => {
       rows.forEach(row => {
         stream.push({
@@ -589,7 +595,7 @@ AedesPersistenceMySQL.prototype.getClientList = function (topic) {
     return stream
   }
 
-  const query = 'SELECT DISTINCT client_id FROM subscriptions WHERE topic = ?'
+  const query = 'SELECT DISTINCT client_id FROM aedes_subscriptions WHERE topic = ?'
   
   this.pool.execute(query, [topic])
     .then(([rows]) => {
